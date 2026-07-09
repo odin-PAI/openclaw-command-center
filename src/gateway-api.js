@@ -14,6 +14,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const { CONFIG, getOpenClawDir } = require("./config");
 
 let _cachedToken = null;
 let _tokenLoadedAt = 0;
@@ -29,11 +30,7 @@ function getGatewayToken() {
     return _cachedToken;
   }
   try {
-    const secretsPath = path.join(
-      process.env.HOME || "/home/odin",
-      ".openclaw",
-      "secrets.json",
-    );
+    const secretsPath = path.join(getOpenClawDir(), "secrets.json");
     const secrets = JSON.parse(fs.readFileSync(secretsPath, "utf8"));
     _cachedToken =
       (secrets.providers &&
@@ -59,7 +56,7 @@ function getGatewayToken() {
  */
 function gatewayInvoke(tool, args = {}, options = {}) {
   const timeoutMs = options.timeoutMs || 10000;
-  const port = options.port || parseInt(process.env.OPENCLAW_GATEWAY_PORT || "18789", 10);
+  const port = options.port || CONFIG.server.gatewayPort;
   const token = getGatewayToken();
 
   return new Promise((resolve, reject) => {

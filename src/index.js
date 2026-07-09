@@ -6,6 +6,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const { execFile } = require("child_process");
 
 // ============================================================================
 // CLI ARGUMENT PARSING
@@ -74,6 +75,8 @@ const {
 } = require("./operators");
 const { createSessionsModule } = require("./sessions");
 const { getCronJobs } = require("./cron");
+const { getPm2Processes } = require("./pm2");
+const { getTailscaleServes } = require("./tailscale");
 const { getCerebroTopics, updateTopicStatus } = require("./cerebro");
 const {
   getDailyTokenUsage,
@@ -147,7 +150,7 @@ const state = createStateModule({
   getCronJobs: () => getCronJobs(),
   loadOperators: () => loadOperators(DATA_DIR),
   calculateOperatorStats,
-  getLlmUsage: () => getLlmUsage(PATHS.state),
+  getLlmUsage: () => getLlmUsage(),
   getDailyTokenUsage: () => getDailyTokenUsage(getOpenClawDir),
   getTokenStats,
   getCerebroTopics: (opts) => getCerebroTopics(PATHS.cerebro, opts),
@@ -495,71 +498,15 @@ const server = http.createServer(async (req, res) => {
       ),
     );
   } else if (pathname === "/api/pm2") {
-    // PM2 process list via `pm2 jlist`
-    const { execFile } = require("child_process");
-    // Try full path first (child process doesn't inherit user PATH)
-    const pm2Candidates = [
-      process.env.PM2_BIN || "",
-      "/home/odin/.npm-global/bin/pm2",
-      "/usr/local/bin/pm2",
-      "/usr/bin/pm2",
-      "pm2",
-    ].filter(Boolean);
-    const pm2Bin = pm2Candidates[0] || "pm2";
-    execFile(pm2Bin, ["jlist"], { encoding: "utf8", timeout: 8000 }, (err, stdout) => {
-      if (err) {
-        // Try next candidate
-        const next = pm2Candidates.find((b, i) => i > 0);
-        if (next && next !== pm2Bin) {
-          execFile(next, ["jlist"], { encoding: "utf8", timeout: 8000 }, (err2, stdout2) => {
-            if (err2) {
-              res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ processes: [], error: err2.message }, null, 2));
-              return;
-            }
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ processes: parsePm2Jlist(stdout2) }, null, 2));
-          });
-          return;
-        }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ processes: [], error: err.message }, null, 2));
-        return;
-      }
+    getPm2Processes().then((data) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ processes: parsePm2Jlist(stdout) }, null, 2));
+      res.end(JSON.stringify(data, null, 2));
     });
     return;
   } else if (pathname === "/api/tailscale") {
-    // Tailscale serve status — runs `tailscale serve status --json`
-    const { execFile } = require("child_process");
-    execFile("tailscale", ["serve", "status", "--json"], { encoding: "utf8", timeout: 5000 }, (err, stdout) => {
-      if (err) {
-        // Fallback: try without --json (older versions)
-        execFile("tailscale", ["serve", "status"], { encoding: "utf8", timeout: 5000 }, (err2, stdout2) => {
-          if (err2) {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ serves: [], error: err2.message }, null, 2));
-            return;
-          }
-          // Parse plain-text output into structured rows
-          const serves = parseTailscaleServePlaintext(stdout2);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ serves }, null, 2));
-        });
-        return;
-      }
-      try {
-        const json = JSON.parse(stdout);
-        const serves = parseTailscaleServeJson(json);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ serves }, null, 2));
-      } catch (e) {
-        // stdout wasn't JSON — parse as plaintext
-        const serves = parseTailscaleServePlaintext(stdout);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ serves }, null, 2));
-      }
+    getTailscaleServes().then((data) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(data, null, 2));
     });
     return;
   } else if (pathname === "/api/cron") {
@@ -730,148 +677,6 @@ const server = http.createServer(async (req, res) => {
     serveStatic(req, res);
   }
 });
-
-// ============================================================================
-// PM2 PARSER
-// ============================================================================
-
-function parsePm2Jlist(stdout) {
-  try {
-    const raw = JSON.parse(stdout);
-    return raw.map((p) => ({
-      name:     p.name,
-      status:   p.pm2_env?.status || "unknown",
-      pid:      p.pid,
-      uptime:   p.pm2_env?.pm_uptime || null,
-      memory:   p.monit?.memory || 0,
-      cpu:      p.monit?.cpu ?? 0,
-      restarts: p.pm2_env?.restart_time ?? 0,
-      mode:     p.pm2_env?.exec_mode || "fork",
-    }));
-  } catch (e) {
-    return [];
-  }
-}
-
-// ============================================================================
-// TAILSCALE SERVE PARSERS
-// ============================================================================
-
-// Friendly labels for known serve ports
-const TAILSCALE_PORT_LABELS = {
-  "443":   "OpenClaw Control UI (default HTTPS)",
-  "3333":  "Command Center (cron dashboard)",
-  "8899":  "Personal OneDrive OAuth callback",
-  "8989":  "Personal OneDrive OAuth callback (alt)",
-  "18789": "OpenClaw Gateway (Odin)",
-  "18790": "Freya Gateway",
-};
-
-/**
- * Parse `tailscale serve status --json` output into a flat array of serve rows.
- * JSON shape (v1.60+):
- *   { TCP: { "443": { Handlers: { "/": { Proxy: "http://127.0.0.1:18789" } } } }, ... }
- * or the newer flat shape:
- *   { Services: [ { Proto, Addr, Handler, ... } ] }
- */
-function parseTailscaleServeJson(json) {
-  const rows = [];
-
-  // Canonical shape: json.Web = { "hostname:PORT": { Handlers: { "/": { Proxy: "..." } } } }
-  // Also check json.TCP for HTTPS flag and json.AllowFunnel for funnel status.
-  if (json.Web && typeof json.Web === "object") {
-    const funnelPorts = new Set(Object.keys(json.AllowFunnel || {})
-      .map(k => k.split(":").pop()));
-
-    for (const [hostPort, webCfg] of Object.entries(json.Web)) {
-      const port = hostPort.split(":").pop() || "443";
-      const isFunnel = funnelPorts.has(port);
-      const handlers = webCfg.Handlers || {};
-      for (const [path, handlerCfg] of Object.entries(handlers)) {
-        rows.push({
-          proto: "https",
-          port,
-          handler: handlerCfg.Proxy || handlerCfg.Text || handlerCfg.Path || "-",
-          path,
-          mode: isFunnel ? "funnel" : "tailnet",
-          label: TAILSCALE_PORT_LABELS[port] || "",
-        });
-      }
-      if (!Object.keys(handlers).length) {
-        rows.push({ proto: "https", port, handler: "-", path: "/", mode: isFunnel ? "funnel" : "tailnet", label: TAILSCALE_PORT_LABELS[port] || "" });
-      }
-    }
-    return rows;
-  }
-
-  // Newer flat Services array
-  if (Array.isArray(json.Services)) {
-    for (const s of json.Services) {
-      const port = String(s.Port || s.Addr || "-");
-      rows.push({
-        proto: s.Protocol || s.Proto || "https",
-        port,
-        handler: s.Handler || s.Backend || s.Proxy || "-",
-        path: s.MountPoint || s.Path || "/",
-        mode: s.Funnel ? "funnel" : "tailnet",
-        label: TAILSCALE_PORT_LABELS[port] || "",
-      });
-    }
-    return rows;
-  }
-
-  // Fallback: TCP map shape
-  for (const [port, portCfg] of Object.entries(json.TCP || {})) {
-    const handlers = portCfg.Handlers || {};
-    for (const [path, handlerCfg] of Object.entries(handlers)) {
-      rows.push({
-        proto: "https",
-        port,
-        handler: handlerCfg.Proxy || handlerCfg.Text || handlerCfg.Path || "-",
-        path,
-        mode: handlerCfg.Funnel ? "funnel" : "tailnet",
-        label: TAILSCALE_PORT_LABELS[port] || "",
-      });
-    }
-    if (!Object.keys(handlers).length) {
-      rows.push({ proto: "https", port, handler: portCfg.TCPForward || "-", path: "/", mode: "tailnet", label: TAILSCALE_PORT_LABELS[port] || "" });
-    }
-  }
-  return rows;
-}
-
-/**
- * Parse plain-text `tailscale serve status` output into serve rows.
- * Typical line: "https://hostname.tail...ts.net:3333  /  http://127.0.0.1:3333"
- */
-function parseTailscaleServePlaintext(text) {
-  const rows = [];
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    // Match lines like: https://...:PORT  PATH  BACKEND
-    const m = trimmed.match(/^(https?):\/\/[^\s]+?(:(\d+))?\/?(\S*)\s+(\S+)/);
-    if (m) {
-      const port = m[3] || "443";
-      rows.push({
-        proto: m[1],
-        port,
-        handler: m[5] || "-",
-        path: "/" + (m[4] || ""),
-        mode: line.includes("funnel") ? "funnel" : "tailnet",
-        label: TAILSCALE_PORT_LABELS[port] || "",
-      });
-    } else if (trimmed.match(/^\d+/)) {
-      // Compact format: PORT  PROTO  BACKEND
-      const parts = trimmed.split(/\s+/);
-      if (parts.length >= 3) {
-        const port = parts[0];
-        rows.push({ proto: parts[1] || "https", port, handler: parts[2], path: "/", mode: "tailnet", label: TAILSCALE_PORT_LABELS[port] || "" });
-      }
-    }
-  }
-  return rows;
-}
 
 // ============================================================================
 // START SERVER

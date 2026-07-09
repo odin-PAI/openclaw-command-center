@@ -6,6 +6,7 @@
  */
 
 const { listSessions } = require("./gateway-api");
+const { CONFIG } = require("./config");
 
 // Cache for usage data
 let usageCache = { data: null, timestamp: 0, refreshing: false };
@@ -13,24 +14,35 @@ const USAGE_CACHE_TTL_MS = 30000; // 30 seconds
 
 // Blended cost per 1M tokens (weighted avg assuming ~3:1 input:output ratio)
 // These approximate real costs better than the broken estimatedCostUsd from sessions
-const BLENDED_RATES = {
-  'claude-opus-4-6':        28.00,  // $15 in + $75 out, blended ~$28/MTok
-  'claude-sonnet-5':         9.00,  // $3 in + $15 out, blended ~$9/MTok
-  'claude-sonnet-4-6':       9.00,
-  'claude-haiku-4-5':        1.75,  // $0.80 in + $4 out, blended ~$1.75/MTok
-  'gpt-5.4':                 8.00,  // $4 in + $16 out, blended ~$8/MTok
-  'gpt-5.4-nano':            0.30,  // $0.10 in + $0.40 out, blended ~$0.30/MTok
-  'gpt-5.2':                 8.00,
-  'gpt-4.1':                 4.00,
-  'gpt-4o':                  5.00,
-  'gpt-4o-mini':             0.30,
-  'grok-4.3':                8.00,  // $3 in + $15 out, blended ~$8/MTok
-  'default':                 5.00,
+const DEFAULT_BLENDED_RATES = {
+  "claude-opus-4-6": 28.0, // $15 in + $75 out, blended ~$28/MTok
+  "claude-sonnet-5": 9.0, // $3 in + $15 out, blended ~$9/MTok
+  "claude-sonnet-4-6": 9.0,
+  "claude-haiku-4-5": 1.75, // $0.80 in + $4 out, blended ~$1.75/MTok
+  "gpt-5.4": 8.0, // $4 in + $16 out, blended ~$8/MTok
+  "gpt-5.4-nano": 0.3, // $0.10 in + $0.40 out, blended ~$0.30/MTok
+  "gpt-5.2": 8.0,
+  "gpt-4.1": 4.0,
+  "gpt-4o": 5.0,
+  "gpt-4o-mini": 0.3,
+  "grok-4.3": 8.0, // $3 in + $15 out, blended ~$8/MTok
+  default: 5.0,
 };
 
+function getBlendedRates() {
+  return {
+    ...DEFAULT_BLENDED_RATES,
+    default: CONFIG.billing?.defaultRate ?? DEFAULT_BLENDED_RATES.default,
+    ...(CONFIG.billing?.blendedRates || {}),
+  };
+}
+
 function blendedCost(modelName, tokens) {
-  const key = Object.keys(BLENDED_RATES).find(k => k !== 'default' && modelName.toLowerCase().startsWith(k.toLowerCase()));
-  const rate = key ? BLENDED_RATES[key] : BLENDED_RATES.default;
+  const rates = getBlendedRates();
+  const key = Object.keys(rates).find(
+    (k) => k !== "default" && modelName.toLowerCase().startsWith(k.toLowerCase()),
+  );
+  const rate = key ? rates[key] : rates.default;
   return (tokens / 1_000_000) * rate;
 }
 

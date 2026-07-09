@@ -192,11 +192,21 @@ function loadConfig() {
   const workspace =
     process.env.OPENCLAW_WORKSPACE || expandPath(fileConfig.paths?.workspace) || detectWorkspace();
 
+  const parseBool = (value) => {
+    if (typeof value === "boolean") return value;
+    if (typeof value !== "string") return !!value;
+    return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+  };
+
   const config = {
     // Server settings
     server: {
       port: parseInt(process.env.PORT || fileConfig.server?.port || "3333", 10),
       host: process.env.HOST || fileConfig.server?.host || "localhost",
+      gatewayPort: parseInt(
+        process.env.OPENCLAW_GATEWAY_PORT || fileConfig.server?.gatewayPort || "18789",
+        10,
+      ),
     },
 
     // Paths - all relative to workspace unless absolute
@@ -257,6 +267,30 @@ function loadConfig() {
         apiKey: process.env.LINEAR_API_KEY || fileConfig.integrations?.linear?.apiKey,
         teamId: process.env.LINEAR_TEAM_ID || fileConfig.integrations?.linear?.teamId,
       },
+      apiCosts: {
+        enabled:
+          process.env.API_COSTS_ENABLED !== undefined
+            ? parseBool(process.env.API_COSTS_ENABLED)
+            : parseBool(fileConfig.integrations?.apiCosts?.enabled),
+        scriptPath:
+          expandPath(process.env.API_COSTS_SCRIPT || fileConfig.integrations?.apiCosts?.scriptPath) ||
+          null,
+      },
+    },
+
+    // Optional external command paths
+    tools: {
+      pm2Binary: process.env.PM2_BIN || fileConfig.tools?.pm2Binary || null,
+      tailscaleBinary:
+        process.env.TAILSCALE_BIN || fileConfig.tools?.tailscaleBinary || "tailscale",
+    },
+
+    // Tailscale serve display labels
+    tailscale: {
+      portLabels: fileConfig.tailscale?.portLabels || {
+        "443": "HTTPS (default)",
+        "3333": "Command Center",
+      },
     },
 
     // Billing - for cost savings calculation
@@ -266,6 +300,8 @@ function loadConfig() {
       ),
       claudePlanName:
         process.env.CLAUDE_PLAN_NAME || fileConfig.billing?.claudePlanName || "Claude Code Max",
+      blendedRates: fileConfig.billing?.blendedRates || null,
+      defaultRate: parseFloat(process.env.BILLING_DEFAULT_RATE || fileConfig.billing?.defaultRate || "5.0"),
     },
   };
 

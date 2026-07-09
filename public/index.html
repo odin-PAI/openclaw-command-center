@@ -366,6 +366,17 @@
           </div>
         </div>
 
+        <!-- Tailscale Section -->
+        <div class="section" id="tailscale-section">
+          <div class="section-header">
+            <div class="section-title">
+              🔑 Tailscale Nodes
+              <span class="section-count" id="tailscale-count">0</span>
+            </div>
+          </div>
+          <div id="tailscale-grid" style="overflow-x:auto"></div>
+        </div>
+
         <!-- PM2 Services Panel -->
         <div class="section" id="pm2-section">
           <div class="section-header">
@@ -2062,6 +2073,7 @@
         else fetch("/api/subagents").then(r=>r.json()).then(d=>{ if(d?.subagents?.length) renderSubagents(d.subagents); }).catch(()=>{});
         fetchPm2();
         fetchTailscale();
+        fetchTailscale();
       }
 
       // Legacy fallback - multiple API calls (used if /api/state fails)
@@ -2116,6 +2128,7 @@
         if (cerebro) renderCerebro(cerebro);
         if (subagents?.subagents) renderSubagents(subagents.subagents);
         if (pm2?.processes) renderPm2(pm2.processes);
+        fetchTailscale();
         if (tailscale?.serves) renderTailscale(tailscale.serves);
 
         const now = new Date().toLocaleTimeString();
@@ -2475,6 +2488,56 @@
               }).join('')}
             </tbody>
           </table>`;
+      }
+
+      function renderTailscale(nodes) {
+        const grid = document.getElementById('tailscale-grid');
+        if (!grid) return;
+        $set('tailscale-count', 'textContent', nodes.length);
+        if (!nodes.length) {
+          grid.innerHTML = '<div style="color:var(--text-muted);font-size:0.8rem;padding:8px">No Tailscale nodes found</div>';
+          return;
+        }
+        const osIcon = os => ({ windows: '🪹', linux: '🐧', macos: '🍎', android: '📱', ios: '📱' }[os?.toLowerCase()] || '🖥️');
+        grid.innerHTML = `
+          <table style="width:100%;border-collapse:collapse;font-size:0.78rem">
+            <thead>
+              <tr style="color:var(--text-muted);text-align:left;border-bottom:1px solid var(--border)">
+                <th style="padding:4px 8px">Node</th>
+                <th style="padding:4px 8px">IP</th>
+                <th style="padding:4px 8px">Status</th>
+                <th style="padding:4px 8px">Relay</th>
+                <th style="padding:4px 8px">OS</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${nodes.map(n => {
+                const online = n.online;
+                const dot = `<span style="color:${online ? '#22c55e' : '#ef4444'}">●</span>`;
+                const statusLabel = n.self ? '<span style="color:#60a5fa;font-size:0.68rem">self</span>' : (online ? '<span style="color:#22c55e">online</span>' : '<span style="color:#ef4444">offline</span>');
+                const lastSeen = !online && n.lastSeen && !n.lastSeen.startsWith('0001') ? (() => {
+                  const ms = Date.now() - new Date(n.lastSeen).getTime();
+                  const h = Math.floor(ms/3600000), m = Math.floor((ms%3600000)/60000);
+                  return `<span style="font-size:0.68rem;color:var(--text-muted)"> (${h > 0 ? h+'h ' : ''}${m}m ago)</span>`;
+                })() : '';
+                return `<tr style="border-bottom:1px solid rgba(255,255,255,0.04)">
+                  <td style="padding:5px 8px;font-weight:500">${dot} ${escapeHtml(n.name || '?')}</td>
+                  <td style="padding:5px 8px;color:var(--text-muted);font-family:monospace;font-size:0.72rem">${escapeHtml(n.ip || '-')}</td>
+                  <td style="padding:5px 8px">${statusLabel}${lastSeen}</td>
+                  <td style="padding:5px 8px;color:var(--text-muted)">${escapeHtml(n.relay || '-')}</td>
+                  <td style="padding:5px 8px">${osIcon(n.os)} <span style="color:var(--text-muted)">${escapeHtml(n.os || '-')}</span></td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`;
+      }
+
+      async function fetchTailscale() {
+        try {
+          const res = await fetch('/api/tailscale');
+          const data = await res.json();
+          renderTailscale(data.nodes || []);
+        } catch(e) { /* silent fail */ }
       }
 
       async function fetchPm2() {
